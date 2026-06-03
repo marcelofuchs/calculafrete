@@ -1,0 +1,6 @@
+# Cache gerado automaticamente — não versionar
+*_df.pkl
+*_modelo.pkl
+__pycache__/
+*.pyc
+.claude/
