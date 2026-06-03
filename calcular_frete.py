@@ -149,7 +149,11 @@ def normalizar_planilha(df: pd.DataFrame) -> pd.DataFrame:
     """
     Detecta o formato de CEP e normaliza para o formato interno.
 
-    Novo formato  (cep_origem, cep_destino, cep_excluido — texto):
+    Novo formato (cep_origem, cep_destino, cep_excluido):
+      cep_origem   — CEP único ou range(s) de coleta: "01000000..09999999" ou lista
+      cep_destino  — CEP único ou range(s) de entrega: "80000000..89999999" ou lista
+      cep_excluido — range(s) excluídos dentro do destino (opcional)
+
       Expande uma linha em N×M linhas pelo produto cartesiano de origens × destinos.
       Armazena os ranges excluídos em '_excluidos' (list de tuplas) por linha.
 

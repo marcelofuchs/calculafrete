@@ -107,7 +107,6 @@ def gerar_planilha(transportadoras: dict, sufixo: str) -> pd.DataFrame:
 
                 dist_factor = 1.0 + abs(i - j) * 0.12
 
-                # Formato novo: range como string
                 cep_origem_str   = f"{cep_oi}..{cep_of}"
                 cep_destino_str  = f"{cep_di}..{cep_df}"
                 cep_excluido_str = EXCLUIDOS.get((transp_nome, reg_dest), '')
@@ -167,14 +166,58 @@ def main():
 
     # Fevereiro — 3 novas transportadoras
     df_fev = gerar_planilha(TRANSPORTADORAS_FEV, 'fev')
+
+    # Linhas extras com CEP único (origem e/ou destino) para testar matching exato
+    EXTRAS = [
+        # CEP único na origem, range no destino
+        {
+            'transportadora': 'Correios PAC', 'cep_origem': '01310100',
+            'cep_destino': '80000000..89999999', 'cep_excluido': '',
+            'peso_min_kg': 0.0, 'peso_max_kg': 5.0,
+            'maior_lado_min_cm': 0, 'maior_lado_max_cm': 80,
+            'cubagem_min_m3': 0.0, 'cubagem_max_m3': 0.1,
+            'valor_frete': 38.50, 'prazo_dias': 5,
+        },
+        # Range na origem, CEP único no destino
+        {
+            'transportadora': 'Braspress', 'cep_origem': '01000000..09999999',
+            'cep_destino': '80050000', 'cep_excluido': '',
+            'peso_min_kg': 1.0, 'peso_max_kg': 20.0,
+            'maior_lado_min_cm': 0, 'maior_lado_max_cm': 120,
+            'cubagem_min_m3': 0.0, 'cubagem_max_m3': 0.5,
+            'valor_frete': 29.90, 'prazo_dias': 6,
+        },
+        # CEP único na origem, lista de CEPs únicos no destino
+        {
+            'transportadora': 'Jadlog .Package', 'cep_origem': '04567000',
+            'cep_destino': '80050000, 80060000, 80070000', 'cep_excluido': '',
+            'peso_min_kg': 0.0, 'peso_max_kg': 10.0,
+            'maior_lado_min_cm': 0, 'maior_lado_max_cm': 60,
+            'cubagem_min_m3': 0.0, 'cubagem_max_m3': 0.2,
+            'valor_frete': 33.00, 'prazo_dias': 4,
+        },
+        # CEP único na origem, destino com range + excluído unitário
+        {
+            'transportadora': 'Total Express', 'cep_origem': '01310100',
+            'cep_destino': '80000000..89999999', 'cep_excluido': '80060000',
+            'peso_min_kg': 0.0, 'peso_max_kg': 30.0,
+            'maior_lado_min_cm': 0, 'maior_lado_max_cm': 100,
+            'cubagem_min_m3': 0.0, 'cubagem_max_m3': 1.0,
+            'valor_frete': 41.00, 'prazo_dias': 4,
+        },
+    ]
+    df_extras = pd.DataFrame(EXTRAS)
+    df_fev = pd.concat([df_fev, df_extras], ignore_index=True)
+
     df_fev.to_excel('planilhas/frete_fev_2026.xlsx', index=False)
     print(f"frete_fev_2026.xlsx: {len(df_fev):,} linhas | "
           f"{df_fev['transportadora'].nunique()} transportadoras")
+    print(f"  (inclui {len(EXTRAS)} linhas extras com CEP único para teste)")
 
     print()
-    print("Exemplo de linha gerada:")
-    print(df_jan[['transportadora', 'cep_origem', 'cep_destino', 'cep_excluido',
-                  'peso_min_kg', 'valor_frete']].head(3).to_string(index=False))
+    print("Exemplos de linhas com CEP único:")
+    print(df_extras[['transportadora', 'cep_origem', 'cep_destino',
+                      'cep_excluido', 'valor_frete']].to_string(index=False))
     print()
     print("Coloque suas planilhas reais em planilhas/ com as mesmas colunas.")
 
