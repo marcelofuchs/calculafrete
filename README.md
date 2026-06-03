@@ -173,25 +173,86 @@ python calcular_frete.py \
 
 ## Estrutura da planilha
 
-Cada arquivo `.xlsx` pode ter qualquer nome e deve conter as seguintes colunas:
+Cada arquivo `.xlsx` pode ter qualquer nome. As colunas de CEP aceitam o **novo formato flexível** (recomendado) ou o formato antigo com colunas separadas (compatibilidade).
 
-| Coluna | Tipo | Exemplo | Obrigatória |
-|---|---|---|---|
-| `transportadora` | texto | `Jadlog .Package` | Sim |
-| `cep_origem_inicio` | inteiro | `1000000` | Sim |
-| `cep_origem_fim` | inteiro | `9999999` | Sim |
-| `cep_destino_inicio` | inteiro | `30000000` | Sim |
-| `cep_destino_fim` | inteiro | `39999999` | Sim |
-| `peso_min_kg` | float | `1.0` | Sim |
-| `peso_max_kg` | float | `5.0` | Sim |
-| `maior_lado_min_cm` | float | `0` | Sim |
-| `maior_lado_max_cm` | float | `80` | Sim |
-| `cubagem_min_m3` | float | `0.0` | Sim |
-| `cubagem_max_m3` | float | `0.1` | Sim |
-| `valor_frete` | float | `45.90` | Sim |
-| `prazo_dias` | inteiro | `4` | Não (dias úteis) |
+### Colunas obrigatórias
 
-> CEPs devem ser inteiros de 8 dígitos sem hífen (`01310100`). A coluna `prazo_dias` representa **dias úteis**.
+| Coluna | Tipo | Exemplo |
+|---|---|---|
+| `transportadora` | texto | `Jadlog .Package` |
+| `cep_origem` | texto | `01000000..09999999` |
+| `cep_destino` | texto | `30000000..39999999` |
+| `peso_min_kg` | float | `1.0` |
+| `peso_max_kg` | float | `5.0` |
+| `maior_lado_min_cm` | float | `0` |
+| `maior_lado_max_cm` | float | `80` |
+| `cubagem_min_m3` | float | `0.0` |
+| `cubagem_max_m3` | float | `0.1` |
+| `valor_frete` | float | `45.90` |
+
+### Colunas opcionais
+
+| Coluna | Tipo | Exemplo |
+|---|---|---|
+| `prazo_dias` | inteiro | `4` *(dias úteis)* |
+| `cep_excluido` | texto | `80010000..80019999` |
+
+---
+
+### Formato das colunas de CEP
+
+`cep_origem`, `cep_destino` e `cep_excluido` seguem o mesmo padrão:
+
+| Formato | Exemplo | Significado |
+|---|---|---|
+| Range | `01000000..09999999` | CEPs de 01000000 até 09999999 |
+| CEP único | `84035565` | Somente o CEP 84035565 |
+| Lista | `01000000..09999999, 84035565` | Range + CEP unitário |
+
+Separador de itens: `,` (vírgula). Separador de range: `..` (dois pontos seguidos).
+CEPs com hífen são normalizados automaticamente: `01310-100` → `01310100`.
+
+---
+
+### Como funciona o `cep_excluido`
+
+Define CEPs ou ranges que **não serão cotados** por aquela transportadora, mesmo que o CEP de destino esteja dentro do range de `cep_destino`. Útil para transportadoras que não atendem determinados bairros ou CEPs específicos.
+
+```
+Exemplo de linha na planilha:
+
+  transportadora  │ cep_destino           │ cep_excluido
+  Correios PAC    │ 80000000..89999999    │ 80010000..80019999
+  Braspress       │ 80000000..89999999    │ (vazio — atende tudo)
+
+Consulta CEP destino = 80015000:
+  Correios PAC  → BLOQUEADA  (80015000 está em 80010000..80019999)
+  Braspress     → DISPONÍVEL (sem exclusão)
+
+Consulta CEP destino = 80050000:
+  Correios PAC  → DISPONÍVEL (80050000 fora do range excluído)
+  Braspress     → DISPONÍVEL
+```
+
+O sistema informa no resultado quais transportadoras foram bloqueadas e o motivo:
+
+```
+  Transportadoras não disponíveis para o CEP consultado:
+  ✗  Correios PAC    range excluído: 80010000..80019999
+```
+
+> **`cep_excluido` é opcional.** Deixar a célula vazia significa que a transportadora atende todos os CEPs do `cep_destino` sem restrição.
+
+---
+
+### Compatibilidade com formato antigo
+
+O formato antigo com colunas separadas ainda é aceito sem alteração:
+
+| Coluna antiga | Substitui |
+|---|---|
+| `cep_origem_inicio` + `cep_origem_fim` | `cep_origem` |
+| `cep_destino_inicio` + `cep_destino_fim` | `cep_destino` |
 
 ---
 
