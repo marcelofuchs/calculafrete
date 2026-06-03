@@ -13,6 +13,8 @@ Uso:
 """
 
 import argparse
+import glob
+import json
 import os
 import sys
 import time
@@ -261,6 +263,35 @@ class ModeloFrete:
 
         return mae_preco, mae_prazo
 
+    def treinar_incremental(self, df_novo: pd.DataFrame) -> bool:
+        """
+        Atualiza o modelo com dados novos sem reler os dados antigos (warm_start).
+        Adiciona árvores proporcionais ao tamanho dos novos dados.
+        Retorna False se detectar novas transportadoras — sinal para full retrain.
+        """
+        if df_novo.empty:
+            return True
+
+        transp_novas = set(df_novo['transportadora'].unique()) - set(self.transportadoras_)
+        if transp_novas:
+            return False  # LabelEncoder não conhece a nova transportadora
+
+        n_add = max(30, min(100, len(df_novo) // 50))
+
+        self.modelo.n_estimators += n_add
+        self.modelo.warm_start = True
+        X = self._extrair_features(df_novo)
+        self.modelo.fit(X, df_novo['valor_frete'].values)
+
+        if self.tem_prazo_:
+            df_p = df_novo.dropna(subset=['prazo_dias'])
+            if not df_p.empty:
+                self.modelo_prazo.n_estimators += max(20, n_add // 2)
+                self.modelo_prazo.warm_start = True
+                self.modelo_prazo.fit(self._extrair_features(df_p), df_p['prazo_dias'].values)
+
+        return True
+
     def prever_todos(self, cep_orig: int, cep_dest: int,
                      peso: float, lado: float, cubagem: float) -> list[dict]:
         """Estima o valor de frete para cada transportadora conhecida."""
@@ -410,24 +441,129 @@ def coletar_interativo() -> tuple[str, str, float, float, float, float, float, i
 
 
 # ---------------------------------------------------------------------------
+# Suporte a pasta com múltiplas planilhas
+# ---------------------------------------------------------------------------
+
+PASTA_PADRAO   = 'planilhas'
+ARQUIVO_PADRAO = 'base_frete.xlsx'
+
+
+def descobrir_fonte() -> str:
+    """
+    Detecta automaticamente a fonte de dados, sem precisar de --planilha ou --pasta.
+    Prioridade:
+      1. pasta  ./planilhas/  com ao menos um .xlsx
+      2. arquivo base_frete.xlsx  no diretório atual
+    """
+    if os.path.isdir(PASTA_PADRAO):
+        arquivos = _xlsx_da_pasta(PASTA_PADRAO)
+        if arquivos:
+            return PASTA_PADRAO
+
+    if os.path.exists(ARQUIVO_PADRAO):
+        return ARQUIVO_PADRAO
+
+    sys.exit(
+        f"\nNenhuma fonte de dados encontrada. Opções:\n"
+        f"  1. Crie a pasta '{PASTA_PADRAO}/' e adicione arquivos .xlsx\n"
+        f"  2. Coloque '{ARQUIVO_PADRAO}' no diretório atual\n"
+        f"  3. Use --planilha <arquivo> ou --pasta <pasta>"
+    )
+
+
+def _xlsx_da_pasta(pasta: str) -> list[str]:
+    """Lista os .xlsx da pasta excluindo temporários e backups."""
+    return [
+        f for f in glob.glob(os.path.join(pasta, '*.xlsx'))
+        if not os.path.basename(f).startswith('~')
+    ]
+
+
+def _mtime_fonte(fonte: str) -> float:
+    """Retorna o mtime mais recente: do arquivo ou do .xlsx mais novo na pasta."""
+    if os.path.isdir(fonte):
+        arquivos = _xlsx_da_pasta(fonte)
+        return max((os.path.getmtime(f) for f in arquivos), default=0.0)
+    return os.path.getmtime(os.path.abspath(fonte))
+
+
+_CHAVE_REGRA = [
+    'transportadora',
+    'cep_origem_inicio', 'cep_origem_fim',
+    'cep_destino_inicio', 'cep_destino_fim',
+    'peso_min_kg', 'peso_max_kg',
+    'maior_lado_min_cm', 'maior_lado_max_cm',
+    'cubagem_min_m3', 'cubagem_max_m3',
+]
+
+
+def _caminho_cache_arquivo(arq: str) -> str:
+    """Cache individual oculto para cada .xlsx na mesma pasta."""
+    pasta = os.path.dirname(arq)
+    nome  = '.' + os.path.splitext(os.path.basename(arq))[0] + '.pkl'
+    return os.path.join(pasta, nome)
+
+
+def carregar_pasta(pasta: str) -> pd.DataFrame:
+    """
+    Lê e combina todos os .xlsx da pasta.
+    Arquivos ordenados do mais antigo ao mais recente (mtime).
+    Cada arquivo tem seu próprio cache — só é relido se foi modificado.
+    Regras duplicadas são resolvidas mantendo a versão mais recente.
+    """
+    arquivos = sorted(
+        _xlsx_da_pasta(pasta),
+        key=os.path.getmtime,   # mais antigo primeiro → mais recente por último
+    )
+    if not arquivos:
+        sys.exit(f"\nNenhum arquivo .xlsx encontrado em: {pasta}")
+
+    dfs = []
+    for arq in arquivos:
+        cache_arq = _caminho_cache_arquivo(arq)
+        if os.path.exists(cache_arq) and os.path.getmtime(cache_arq) >= os.path.getmtime(arq):
+            df_arq = joblib.load(cache_arq)
+            status = 'cache'
+        else:
+            df_arq = carregar_base(arq)
+            joblib.dump(df_arq, cache_arq)
+            status = 'lido'
+        dfs.append(df_arq)
+        print(f'    {os.path.basename(arq)}: {len(df_arq):,} regras  [{status}]')
+
+    df_bruto = pd.concat(dfs, ignore_index=True)
+
+    # Deduplicação: mesma regra em arquivos diferentes → versão mais recente vence
+    chaves_presentes = [c for c in _CHAVE_REGRA if c in df_bruto.columns]
+    df = df_bruto.drop_duplicates(subset=chaves_presentes, keep='last').reset_index(drop=True)
+
+    duplicatas = len(df_bruto) - len(df)
+    sufixo = f'  ({duplicatas:,} duplicata(s) removida(s))' if duplicatas else ''
+    print(f'  Total combinado: {len(df):,} regras  |  '
+          f'{df["transportadora"].nunique()} transportadoras{sufixo}')
+    return df
+
+
+# ---------------------------------------------------------------------------
 # Cache do DataFrame em disco
 # ---------------------------------------------------------------------------
 
-def _caminho_cache_df(planilha: str) -> str:
-    return os.path.splitext(os.path.abspath(planilha))[0] + '_df.pkl'
+def _caminho_cache_df(fonte: str) -> str:
+    if os.path.isdir(fonte):
+        return os.path.join(os.path.abspath(fonte), '.cache_df.pkl')
+    return os.path.splitext(os.path.abspath(fonte))[0] + '_df.pkl'
 
 
-def carregar_base_com_cache(caminho: str) -> pd.DataFrame:
+def carregar_base_com_cache(fonte: str) -> pd.DataFrame:
     """
     Carrega o DataFrame do cache binário se estiver atualizado.
-    Na primeira execução (ou quando a planilha mudar), lê o Excel,
-    valida e salva o cache para as próximas chamadas.
+    Aceita um arquivo .xlsx ou uma pasta com múltiplos .xlsx.
+    Reconstrói o cache automaticamente quando qualquer arquivo mudar.
     """
-    cache = _caminho_cache_df(caminho)
-    caminho_abs = os.path.abspath(caminho)
+    cache = _caminho_cache_df(fonte)
 
     if os.path.exists(cache):
-        if os.path.getmtime(cache) >= os.path.getmtime(caminho_abs):
+        if os.path.getmtime(cache) >= _mtime_fonte(fonte):
             t0 = time.perf_counter()
             df = joblib.load(cache)
             ms = (time.perf_counter() - t0) * 1000
@@ -435,10 +571,11 @@ def carregar_base_com_cache(caminho: str) -> pd.DataFrame:
                   f'transportadoras  (cache: {ms:.0f} ms)')
             return df
 
-    df = carregar_base(caminho)
+    df = carregar_pasta(fonte) if os.path.isdir(fonte) else carregar_base(fonte)
     joblib.dump(df, cache)
-    print(f'  {len(df):,} regras  |  {df["transportadora"].nunique()} '
-          f'transportadoras  (Excel parseado — cache salvo)')
+    if not os.path.isdir(fonte):
+        print(f'  {len(df):,} regras  |  {df["transportadora"].nunique()} '
+              f'transportadoras  (Excel parseado — cache salvo)')
     return df
 
 
@@ -446,45 +583,119 @@ def carregar_base_com_cache(caminho: str) -> pd.DataFrame:
 # Cache do modelo ML em disco
 # ---------------------------------------------------------------------------
 
-def _caminho_cache(planilha: str) -> str:
-    """Arquivo .pkl gerado ao lado da planilha."""
-    return os.path.splitext(os.path.abspath(planilha))[0] + '_modelo.pkl'
+def _caminho_cache(fonte: str) -> str:
+    if os.path.isdir(fonte):
+        return os.path.join(os.path.abspath(fonte), '.cache_modelo.pkl')
+    return os.path.splitext(os.path.abspath(fonte))[0] + '_modelo.pkl'
+
+
+def _caminho_manifest(fonte: str) -> str:
+    if os.path.isdir(fonte):
+        return os.path.join(os.path.abspath(fonte), '.cache_modelo_manifest.json')
+    return os.path.splitext(os.path.abspath(fonte))[0] + '_modelo_manifest.json'
+
+
+def _mapa_atual(fonte: str) -> dict[str, float]:
+    """Retorna {nome_arquivo: mtime} para todos os .xlsx da fonte."""
+    if os.path.isdir(fonte):
+        return {
+            os.path.basename(f): round(os.path.getmtime(f), 3)
+            for f in sorted(_xlsx_da_pasta(fonte), key=os.path.getmtime)
+        }
+    abs_fonte = os.path.abspath(fonte)
+    return {os.path.basename(abs_fonte): round(os.path.getmtime(abs_fonte), 3)}
+
+
+def _carregar_df_arquivo(fonte: str, nome: str) -> pd.DataFrame:
+    """Carrega o DataFrame de um arquivo específico, do cache individual se disponível."""
+    arq = os.path.join(fonte, nome) if os.path.isdir(fonte) else fonte
+    pkl = _caminho_cache_arquivo(arq)
+    if os.path.exists(pkl) and os.path.getmtime(pkl) >= os.path.getmtime(arq):
+        return joblib.load(pkl)
+    return carregar_base(arq)
 
 
 def carregar_ou_treinar_modelo(
-    df: pd.DataFrame, planilha: str
+    df_completo: pd.DataFrame, fonte: str
 ) -> tuple['ModeloFrete', float, float]:
     """
-    Carrega o modelo serializado se estiver mais recente que a planilha.
-    Caso contrário, treina, exibe MAE e salva em disco.
-    Retorna (modelo, mae_preco, mae_prazo).
+    Gerencia o ciclo de vida do modelo ML:
+    - Sem modelo salvo → treino completo em todos os arquivos
+    - Arquivos existentes modificados → treino completo (dados mudaram)
+    - Apenas novos arquivos → treino incremental (warm_start só nos novos)
+    - Nada mudou → carrega do cache
     """
-    cache = _caminho_cache(planilha)
-    planilha_abs = os.path.abspath(planilha)
+    cache         = _caminho_cache(fonte)
+    manifest_path = _caminho_manifest(fonte)
+    atual         = _mapa_atual(fonte)
 
-    if os.path.exists(cache):
-        if os.path.getmtime(cache) >= os.path.getmtime(planilha_abs):
-            print('  Carregando modelo do cache ...')
-            t0 = _now_ms()
-            dados = joblib.load(cache)
-            print(f'  Modelo carregado em {_now_ms() - t0:.0f} ms  '
-                  f'(MAE preço: R$ {dados["mae_preco"]:.2f}  |  '
-                  f'MAE prazo: {dados["mae_prazo"]:.1f} d.u.)')
-            return dados['modelo'], dados['mae_preco'], dados['mae_prazo']
+    # Carrega manifesto salvo (quais arquivos já foram aprendidos)
+    manifest: dict[str, float] = {}
+    if os.path.exists(manifest_path):
+        with open(manifest_path) as f:
+            manifest = json.load(f)
 
-    print(f'  Treinando com {len(df):,} exemplos ...')
-    t0 = _now_ms()
-    modelo = ModeloFrete()
-    mae_preco, mae_prazo = modelo.treinar(df)
+    def _salvar(modelo, mae_p, mae_t):
+        joblib.dump({'modelo': modelo, 'mae_preco': mae_p, 'mae_prazo': mae_t}, cache)
+        with open(manifest_path, 'w') as f:
+            json.dump(atual, f, indent=2)
+
+    def _full_retrain(motivo: str):
+        print(f'  {motivo} → treino completo com {len(df_completo):,} exemplos ...')
+        t0 = _now_ms()
+        m = ModeloFrete()
+        mae_p, mae_t = m.treinar(df_completo)
+        elapsed = _now_ms() - t0
+        ip = f'R$ {mae_p:.2f}' if mae_p > 0 else 'N/A'
+        it = f'{mae_t:.1f} d.u.' if mae_t > 0 else 'N/A'
+        print(f'  Treinado em {elapsed:.0f} ms  |  MAE preço: {ip}  |  MAE prazo: {it}')
+        _salvar(m, mae_p, mae_t)
+        return m, mae_p, mae_t
+
+    # Nenhum modelo salvo ainda
+    if not os.path.exists(cache):
+        return _full_retrain('Primeiro treinamento')
+
+    # Classifica cada arquivo atual em relação ao manifesto
+    novos      = {n: t for n, t in atual.items() if n not in manifest}
+    alterados  = {n: t for n, t in atual.items()
+                  if n in manifest and manifest[n] != t}
+    removidos  = {n for n in manifest if n not in atual}
+
+    # Arquivo alterado ou removido → full retrain (dados mudaram)
+    if alterados:
+        return _full_retrain(f'Arquivo(s) modificado(s): {list(alterados)}')
+    if removidos:
+        return _full_retrain(f'Arquivo(s) removido(s): {list(removidos)}')
+
+    # Nada mudou → cache válido
+    if not novos:
+        print('  Carregando modelo do cache ...')
+        t0 = _now_ms()
+        dados = joblib.load(cache)
+        print(f'  Modelo carregado em {_now_ms() - t0:.0f} ms  '
+              f'(MAE preço: R$ {dados["mae_preco"]:.2f}  |  '
+              f'MAE prazo: {dados["mae_prazo"]:.1f} d.u.)')
+        return dados['modelo'], dados['mae_preco'], dados['mae_prazo']
+
+    # Apenas arquivos novos → treino incremental
+    print(f'  {len(novos)} novo(s) arquivo(s): {list(novos)} → treinamento incremental ...')
+    dfs_novos = [_carregar_df_arquivo(fonte, nome) for nome in novos]
+    df_novo   = pd.concat(dfs_novos, ignore_index=True)
+
+    dados  = joblib.load(cache)
+    modelo = dados['modelo']
+
+    t0      = _now_ms()
+    sucesso = modelo.treinar_incremental(df_novo)
     elapsed = _now_ms() - t0
-    info_p = f'R$ {mae_preco:.2f}' if mae_preco > 0 else 'N/A'
-    info_t = f'{mae_prazo:.1f} d.u.' if mae_prazo > 0 else 'N/A'
-    print(f'  Modelo treinado em {elapsed:.0f} ms  |  MAE preço: {info_p}  |  MAE prazo: {info_t}')
 
-    joblib.dump({'modelo': modelo, 'mae_preco': mae_preco, 'mae_prazo': mae_prazo}, cache)
-    print(f'  Cache salvo: {os.path.basename(cache)}')
+    if not sucesso:
+        return _full_retrain('Nova transportadora detectada')
 
-    return modelo, mae_preco, mae_prazo
+    print(f'  Modelo atualizado em {elapsed:.0f} ms  (+{len(df_novo):,} exemplos novos)')
+    _salvar(modelo, dados['mae_preco'], dados['mae_prazo'])
+    return modelo, dados['mae_preco'], dados['mae_prazo']
 
 
 def _now_ms() -> float:
@@ -505,17 +716,19 @@ Exemplos:
   # Modo interativo (recomendado para uso manual)
   python calcular_frete.py --interativo
 
-  # Modo direto (ideal para integração / scripts)
+  # Modo direto — planilha única
   python calcular_frete.py \\
       --cep-origem 01310100 --cep-destino 30130110 \\
       --peso 3.5 --altura 20 --largura 30 --comprimento 40
 
-  # Usando planilha personalizada
-  python calcular_frete.py --planilha minha_tabela.xlsx --interativo
+  # Pasta com múltiplas planilhas (aprendizado evolutivo)
+  python calcular_frete.py --pasta ./planilhas/ --interativo
         """,
     )
-    parser.add_argument('--planilha',    default='base_frete.xlsx',
-                        help='Planilha Excel com as regras de frete')
+    parser.add_argument('--planilha',    default=None,
+                        help='Planilha .xlsx (padrão: auto-detectado)')
+    parser.add_argument('--pasta',       default=None,
+                        help='Pasta com múltiplos .xlsx (padrão: auto-detectado)')
     parser.add_argument('--cep-origem',  dest='cep_origem')
     parser.add_argument('--cep-destino', dest='cep_destino')
     parser.add_argument('--peso',        type=float)
@@ -538,6 +751,21 @@ Exemplos:
     print('═' * 68)
     print('  SISTEMA DE CÁLCULO DE FRETE — ML Edition')
     print('═' * 68)
+
+    # Resolve a fonte antes de qualquer interação com o usuário
+    if args.pasta:
+        if not os.path.isdir(args.pasta):
+            sys.exit(f"\nErro: pasta não encontrada — {args.pasta}")
+        fonte = args.pasta
+    elif args.planilha:
+        fonte = args.planilha
+    else:
+        fonte = descobrir_fonte()
+
+    if os.path.isdir(fonte):
+        print(f'\n  Fonte detectada: pasta {fonte}/')
+    else:
+        print(f'\n  Fonte detectada: {fonte}')
 
     tem_args = all([args.cep_origem, args.cep_destino,
                     args.peso, args.altura, args.largura, args.comprimento])
@@ -566,8 +794,7 @@ Exemplos:
     print(f'    Maior lado   :  {lado:.1f} cm  (calculado)')
     print(f'    Cubagem      :  {cub:.6f} m³  (calculado)')
 
-    print(f'\n  Carregando base: {args.planilha} ...')
-    df = carregar_base_com_cache(args.planilha)
+    df = carregar_base_com_cache(fonte)
 
     t_inicio = time.perf_counter()
     print(f'\n  Buscando correspondências exatas ...')
@@ -582,7 +809,7 @@ Exemplos:
             resultados = []
         else:
             print('  Sem correspondência exata — ativando modelo ML.')
-            modelo, _, _ = carregar_ou_treinar_modelo(df, args.planilha)
+            modelo, _, _ = carregar_ou_treinar_modelo(df, fonte)
             resultados = modelo.prever_todos(cep_orig, cep_dest, peso, lado, cub)
 
     elapsed_ms = (time.perf_counter() - t_inicio) * 1000

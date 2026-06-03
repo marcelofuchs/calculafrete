@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Gera base_frete.xlsx com dados sintéticos realistas para teste.
+Gera planilhas/base_frete.xlsx com dados sintéticos realistas para teste.
 Execute uma vez antes de usar calcular_frete.py.
 
 Estrutura da planilha gerada:
@@ -8,7 +8,7 @@ Estrutura da planilha gerada:
   peso_min_kg    | peso_max_kg       | maior_lado_min_cm | maior_lado_max_cm
   cubagem_min_m3 | cubagem_max_m3    | valor_frete       | prazo_dias
 
-Substitua base_frete.xlsx pela sua planilha real mantendo esses nomes de coluna.
+Coloque suas planilhas reais em planilhas/ mantendo esses nomes de coluna.
 """
 
 import pandas as pd
@@ -142,16 +142,20 @@ def main():
                                 'prazo_dias':         prazo,
                             })
 
-    df = pd.DataFrame(rows)
-    df.to_excel('base_frete.xlsx', index=False)
+    import os
+    os.makedirs('planilhas', exist_ok=True)
+    destino = os.path.join('planilhas', 'base_frete.xlsx')
 
-    print(f"base_frete.xlsx gerada com sucesso.")
+    df = pd.DataFrame(rows)
+    df.to_excel(destino, index=False)
+
+    print(f"{destino} gerada com sucesso.")
     print(f"  Regras      : {len(df):,}")
     print(f"  Transportad.: {df['transportadora'].nunique()}")
     print(f"  Valor mín   : R$ {df['valor_frete'].min():.2f}")
     print(f"  Valor máx   : R$ {df['valor_frete'].max():.2f}")
     print()
-    print("Substitua base_frete.xlsx pela sua planilha real")
+    print("Coloque suas planilhas reais em planilhas/")
     print("mantendo os mesmos nomes de coluna.")
 
 
