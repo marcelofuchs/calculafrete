@@ -20,6 +20,7 @@ import sys
 import time
 import warnings
 from datetime import date, timedelta
+from itertools import product as iterproduct
 
 import joblib
 import numpy as np
@@ -97,15 +98,16 @@ def data_entrega(prazo_uteis: int, inicio: date | None = None) -> date:
 def formatar_data(d: date) -> str:
     return f"{d.day:02d}/{_MESES[d.month - 1]}"
 
-COLUNAS_OBRIGATORIAS = [
+# Colunas obrigatórias que não dependem do formato de CEP
+COLUNAS_BASE = [
     'transportadora',
-    'cep_origem_inicio', 'cep_origem_fim',
-    'cep_destino_inicio', 'cep_destino_fim',
     'peso_min_kg', 'peso_max_kg',
     'maior_lado_min_cm', 'maior_lado_max_cm',
     'cubagem_min_m3', 'cubagem_max_m3',
     'valor_frete',
 ]
+# Mantido para compatibilidade com código legado que referencia COLUNAS_OBRIGATORIAS
+COLUNAS_OBRIGATORIAS = COLUNAS_BASE
 
 
 # ---------------------------------------------------------------------------
@@ -117,8 +119,91 @@ def normalizar_cep(valor) -> int:
     return int(str(valor).replace('-', '').replace('.', '').strip().zfill(8))
 
 
+def parsear_ceps(texto) -> list[tuple[int, int]]:
+    """
+    Parseia string de CEPs com ranges (..) e listas (,).
+
+      "83808000..83880999"            → [(83808000, 83880999)]
+      "84035565"                      → [(84035565, 84035565)]
+      "83808000..83880999, 84035565"  → [(83808000, 83880999), (84035565, 84035565)]
+    """
+    if not texto or str(texto).strip() in ('', 'nan', 'None'):
+        return []
+    resultado = []
+    for item in str(texto).split(','):
+        item = item.strip()
+        if not item:
+            continue
+        if '..' in item:
+            partes = item.split('..', 1)
+            ini = normalizar_cep(partes[0].strip())
+            fim = normalizar_cep(partes[1].strip())
+            resultado.append((min(ini, fim), max(ini, fim)))
+        else:
+            cep = normalizar_cep(item)
+            resultado.append((cep, cep))
+    return resultado
+
+
+def normalizar_planilha(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Detecta o formato de CEP e normaliza para o formato interno.
+
+    Novo formato  (cep_origem, cep_destino, cep_excluido — texto):
+      Expande uma linha em N×M linhas pelo produto cartesiano de origens × destinos.
+      Armazena os ranges excluídos em '_excluidos' (list de tuplas) por linha.
+
+    Formato antigo (cep_origem_inicio/fim, cep_destino_inicio/fim — inteiros):
+      Usa diretamente; adiciona '_excluidos' vazio para compatibilidade.
+    """
+    tem_novo   = 'cep_destino' in df.columns
+    tem_antigo = 'cep_destino_inicio' in df.columns
+
+    if tem_antigo and not tem_novo:
+        for col in ['cep_origem_inicio', 'cep_origem_fim',
+                    'cep_destino_inicio', 'cep_destino_fim']:
+            if col in df.columns:
+                df[col] = df[col].apply(lambda x: normalizar_cep(int(float(x))))
+        df = df.copy()
+        df['_excluidos'] = [[] for _ in range(len(df))]
+        return df
+
+    if not tem_novo:
+        sys.exit(
+            "\nColunas de CEP não encontradas.\n"
+            "Use 'cep_origem'/'cep_destino' (novo formato) ou "
+            "'cep_origem_inicio'/'cep_destino_inicio' (formato antigo)."
+        )
+
+    colunas_fixas = [c for c in df.columns
+                     if c not in ('cep_origem', 'cep_destino', 'cep_excluido',
+                                  'cep_origem_inicio', 'cep_origem_fim',
+                                  'cep_destino_inicio', 'cep_destino_fim', '_excluidos')]
+    rows = []
+    for _, row in df.iterrows():
+        origens   = parsear_ceps(row.get('cep_origem',   ''))
+        destinos  = parsear_ceps(row.get('cep_destino',  ''))
+        excluidos = parsear_ceps(row.get('cep_excluido', ''))
+
+        if not origens or not destinos:
+            continue
+
+        base = {c: row[c] for c in colunas_fixas}
+        base['_excluidos'] = excluidos
+
+        for (oi, of_), (di, df_) in iterproduct(origens, destinos):
+            rows.append({**base,
+                         'cep_origem_inicio': oi,  'cep_origem_fim':  of_,
+                         'cep_destino_inicio': di, 'cep_destino_fim': df_})
+
+    return pd.DataFrame(rows) if rows else pd.DataFrame(
+        columns=colunas_fixas + ['cep_origem_inicio', 'cep_origem_fim',
+                                  'cep_destino_inicio', 'cep_destino_fim', '_excluidos']
+    )
+
+
 def carregar_base(caminho: str) -> pd.DataFrame:
-    """Carrega e valida a planilha Excel."""
+    """Carrega, valida e normaliza a planilha Excel (novo ou antigo formato de CEP)."""
     try:
         df = pd.read_excel(caminho, engine='openpyxl')
     except FileNotFoundError:
@@ -126,27 +211,30 @@ def carregar_base(caminho: str) -> pd.DataFrame:
     except Exception as e:
         sys.exit(f"\nErro ao ler planilha: {e}")
 
-    faltando = [c for c in COLUNAS_OBRIGATORIAS if c not in df.columns]
+    faltando = [c for c in COLUNAS_BASE if c not in df.columns]
     if faltando:
         sys.exit(
             f"\nColunas obrigatórias ausentes: {faltando}"
             f"\nColunas encontradas: {list(df.columns)}"
         )
 
-    for col in ['cep_origem_inicio', 'cep_origem_fim',
-                'cep_destino_inicio', 'cep_destino_fim']:
-        df[col] = df[col].apply(lambda x: normalizar_cep(int(float(x))))
-
-    return df.dropna(subset=COLUNAS_OBRIGATORIAS).reset_index(drop=True)
+    df = normalizar_planilha(df)
+    return df.dropna(subset=COLUNAS_BASE).reset_index(drop=True)
 
 
 # ---------------------------------------------------------------------------
 # Busca exata
 # ---------------------------------------------------------------------------
 
-def buscar_exato(df: pd.DataFrame, cep_orig: int, cep_dest: int,
-                 peso: float, lado: float, cubagem: float) -> pd.DataFrame:
-    """Filtra regras que cobrem exatamente os parâmetros informados."""
+def buscar_exato(
+    df: pd.DataFrame, cep_orig: int, cep_dest: int,
+    peso: float, lado: float, cubagem: float
+) -> tuple[pd.DataFrame, list[dict]]:
+    """
+    Retorna (válidos, excluídos).
+    válidos    — DataFrame com as regras que cobrem o CEP e não o excluem.
+    excluídos  — lista de {transportadora, motivo} para as regras bloqueadas por cep_excluido.
+    """
     mask = (
         (df['cep_origem_inicio']  <= cep_orig)  & (df['cep_origem_fim']   >= cep_orig)  &
         (df['cep_destino_inicio'] <= cep_dest)  & (df['cep_destino_fim']  >= cep_dest)  &
@@ -154,7 +242,34 @@ def buscar_exato(df: pd.DataFrame, cep_orig: int, cep_dest: int,
         (df['maior_lado_min_cm']  <= lado)      & (df['maior_lado_max_cm'] >  lado)     &
         (df['cubagem_min_m3']     <= cubagem)   & (df['cubagem_max_m3']    >  cubagem)
     )
-    return df[mask].copy()
+    candidatos = df[mask].copy()
+
+    if candidatos.empty or '_excluidos' not in candidatos.columns:
+        return candidatos, []
+
+    validos_idx, excluidos_vistos = [], {}
+    for idx, row in candidatos.iterrows():
+        motivo_encontrado = None
+        for ini, fim in row['_excluidos']:
+            if ini <= cep_dest <= fim:
+                motivo_encontrado = (f"CEP excluído: {ini}"
+                                     if ini == fim
+                                     else f"range excluído: {ini}..{fim}")
+                break
+
+        if motivo_encontrado:
+            transp = row['transportadora']
+            if transp not in excluidos_vistos:
+                excluidos_vistos[transp] = motivo_encontrado
+        else:
+            validos_idx.append(idx)
+
+    # Não exibe como excluída uma transportadora que já tem regra válida
+    transp_validas = {candidatos.loc[i, 'transportadora'] for i in validos_idx}
+    excluidos = [{'transportadora': t, 'motivo': m}
+                 for t, m in excluidos_vistos.items()
+                 if t not in transp_validas]
+    return candidatos.loc[validos_idx], excluidos
 
 
 def montar_resultados_exatos(exatos: pd.DataFrame) -> list[dict]:
@@ -365,7 +480,8 @@ def calcular_score(resultados: list[dict], w_preco: int) -> list[dict]:
 DIV = '─' * 68
 
 def exibir_resultados(resultados: list[dict], w_preco: int = 50,
-                      elapsed_ms: float | None = None) -> None:
+                      elapsed_ms: float | None = None,
+                      excluidos: list[dict] | None = None) -> None:
     print()
     print(DIV)
     print('  RESULTADO — OPÇÕES DE FRETE DISPONÍVEIS')
@@ -409,7 +525,14 @@ def exibir_resultados(resultados: list[dict], w_preco: int = 50,
     print(f"  MELHOR OPÇÃO: {melhor['transportadora']}  →  R$ {melhor['valor_frete']:.2f}{prazo_m}")
     if elapsed_ms is not None:
         print(f"  Tempo de cotação: {elapsed_ms:.0f} ms")
-    print(f"{DIV}\n")
+    print(DIV)
+
+    if excluidos:
+        print()
+        print(f"  Transportadoras não disponíveis para o CEP consultado:")
+        for e in excluidos:
+            print(f"  ✗  {e['transportadora']:<22}  {e['motivo']}")
+    print()
 
 
 # ---------------------------------------------------------------------------
@@ -798,7 +921,7 @@ Exemplos:
 
     t_inicio = time.perf_counter()
     print(f'\n  Buscando correspondências exatas ...')
-    exatos = buscar_exato(df, cep_orig, cep_dest, peso, lado, cub)
+    exatos, excluidos = buscar_exato(df, cep_orig, cep_dest, peso, lado, cub)
 
     if not exatos.empty:
         print(f'  {len(exatos)} linha(s) encontrada(s). ✓')
@@ -813,7 +936,7 @@ Exemplos:
             resultados = modelo.prever_todos(cep_orig, cep_dest, peso, lado, cub)
 
     elapsed_ms = (time.perf_counter() - t_inicio) * 1000
-    exibir_resultados(resultados, w_preco, elapsed_ms)
+    exibir_resultados(resultados, w_preco, elapsed_ms, excluidos)
 
 
 if __name__ == '__main__':
