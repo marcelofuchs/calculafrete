@@ -56,6 +56,8 @@ python gerar_base_exemplo.py
 
 ## Como rodar
 
+> **Não é necessário informar planilha ou pasta.** O sistema detecta a pasta `planilhas/` automaticamente. Basta rodar o comando.
+
 ### Modo interativo (uso manual)
 
 ```bash
@@ -145,10 +147,13 @@ python calcular_frete.py \
 | `--comprimento` | float | — | Comprimento do produto em cm |
 | `--prioridade-preco` | int (0–100) | `50` | Peso do preço no ranking (0 = só prazo, 100 = só preço) |
 | `--interativo` | flag | — | Ativa entrada interativa pelo terminal |
-| `--planilha` | string | auto | Força uso de um arquivo `.xlsx` específico |
-| `--pasta` | string | auto | Força uso de uma pasta específica |
+| `--planilha` | string | — | *(opcional)* Override: força uso de um arquivo `.xlsx` específico |
+| `--pasta` | string | — | *(opcional)* Override: força uso de uma pasta específica |
 
-> **Auto-detecção:** se nem `--planilha` nem `--pasta` forem informados, o sistema procura primeiro a pasta `planilhas/` no diretório atual; se não existir, procura `base_frete.xlsx`. Se nenhum for encontrado, exibe mensagem de erro com instruções.
+> **Nenhum dos dois é obrigatório.** Sem `--planilha` e sem `--pasta`, o sistema procura automaticamente:
+> 1. Pasta `planilhas/` no diretório atual (prioridade)
+> 2. Arquivo `base_frete.xlsx` no diretório atual (fallback)
+> 3. Nenhum encontrado → exibe mensagem de erro com instruções
 
 ---
 
