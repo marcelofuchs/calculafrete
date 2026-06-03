@@ -84,14 +84,28 @@ O sistema detecta `planilhas/` automaticamente e pergunta os dados:
 ### Modo direto (scripts / integração)
 
 ```bash
+# Equilíbrio entre preço e prazo (padrão — não precisa informar)
 python calcular_frete.py \
-  --cep-origem 01310100 \
-  --cep-destino 90040060 \
-  --peso 4.2 \
-  --altura 20 \
-  --largura 30 \
-  --comprimento 40 \
+  --cep-origem 01310100 --cep-destino 90040060 \
+  --peso 4.2 --altura 20 --largura 30 --comprimento 40
+
+# Prioriza preço (70% preço / 30% prazo)
+python calcular_frete.py \
+  --cep-origem 01310100 --cep-destino 90040060 \
+  --peso 4.2 --altura 20 --largura 30 --comprimento 40 \
   --prioridade-preco 70
+
+# Só preço importa
+python calcular_frete.py \
+  --cep-origem 01310100 --cep-destino 90040060 \
+  --peso 4.2 --altura 20 --largura 30 --comprimento 40 \
+  --prioridade-preco 100
+
+# Só prazo importa (mais rápido ganha)
+python calcular_frete.py \
+  --cep-origem 01310100 --cep-destino 90040060 \
+  --peso 4.2 --altura 20 --largura 30 --comprimento 40 \
+  --prioridade-preco 0
 ```
 
 ### Exemplo de saída
