@@ -179,6 +179,8 @@ O sistema considera como dias **não úteis**:
 
 Feriados móveis calculados automaticamente para qualquer ano: Páscoa, Carnaval (2ª e 3ª), Sexta-feira Santa e Corpus Christi.
 
+> **Nota:** o sistema não possui uma base de feriados — os 12 feriados nacionais são calculados algoritmicamente a cada consulta. Feriados estaduais, municipais e pontos facultativos **não são cobertos**. Este ponto pode ser adaptado conforme a necessidade de cada operação, inclusive consultando fontes externas (APIs públicas como a do IBGE ou serviços de calendário), porém requer desenvolvimento adicional.
+
 ---
 
 ## Usando sua própria planilha
